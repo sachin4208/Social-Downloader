@@ -1,162 +1,151 @@
+from flask import Flask, request, jsonify
+import threading
 import os
-from flask import Flask, render_template, request, jsonify, session
-from flask_bootstrap import Bootstrap5
-from celery import Celery
-import yt_dlp
-from datetime import datetime
-from config import Config
-from models import db, History, Setting
+from downloader import Downloader
 
 app = Flask(__name__)
-app.config.from_object(Config)
-Bootstrap5(app)
-db.init_app(app)
 
-# Celery Setup
-celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
-celery.conf.update(app.config)
+# Global variables
+download_dir = os.getcwd()
+downloader = Downloader(download_dir)
+queue_lock = threading.Lock()
+active_downloads = {}
+download_history = []
 
-# Initialize Database
-with app.app_context():
-    db.create_all()
-    # Set default settings if not present
-    defaults = {
-        'download_dir': app.config['DOWNLOAD_DIR'],
-        'proxy': '',
-        'theme': 'dark',
-        'auto_download': 'False',
-        'notify_sound': 'True',
-        'speed_limit': '500'  # KB/s
-    }
-    for key, value in defaults.items():
-        if not Setting.query.filter_by(key=key).first():
-            db.session.add(Setting(key=key, value=value))
-    db.session.commit()
+@app.route('/')
+def index():
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Social Media Downloader</title>
+        <style>
+            body { font-family: Arial, sans-serif; background-color: #1E272C; color: #ECEFF1; margin: 0; padding: 0; }
+            header { background-color: #0288D1; padding: 10px; text-align: center; }
+            .container { display: flex; justify-content: space-around; padding: 20px; }
+            section { background-color: #2E3B41; padding: 20px; border-radius: 5px; width: 30%; }
+            h2 { color: #81D4FA; }
+            form label { margin-top: 10px; display: block; }
+            textarea, select, button { width: 100%; margin-top: 5px; padding: 5px; }
+            button { background-color: #0288D1; color: white; border: none; padding: 10px; cursor: pointer; }
+            button:hover { background-color: #4FC3F7; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            th, td { border: 1px solid #ECEFF1; padding: 8px; text-align: left; }
+            th { background-color: #0288D1; }
+        </style>
+    </head>
+    <body>
+        <header><h1>Social Media Downloader</h1></header>
+        <div class="container">
+            <section id="download-section">
+                <h2>Download</h2>
+                <form id="download-form">
+                    <label for="urls">URLs (one per line):</label><br>
+                    <textarea id="urls" name="urls" rows="5" cols="50"></textarea><br>
+                    <label for="format">Format:</label>
+                    <select id="format" name="format">
+                        <option value="Video+Audio (MP4)">Video+Audio (MP4)</option>
+                        <option value="Audio only (MP3)">Audio only (MP3)</option>
+                    </select><br>
+                    <label for="quality">Quality:</label>
+                    <select id="quality" name="quality">
+                        <option value="720p">720p</option>
+                        <option value="480p">480p</option>
+                        <option value="1080p">1080p</option>
+                    </select><br>
+                    <button type="submit">Download</button>
+                </form>
+            </section>
+            <section id="queue-section">
+                <h2>Queue</h2>
+                <button id="clear-queue">Clear Queue</button>
+                <table id="queue-table">
+                    <thead><tr><th>URL</th><th>Status</th><th>Progress</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </section>
+            <section id="history-section">
+                <h2>History</h2>
+                <table id="history-table">
+                    <thead><tr><th>Time</th><th>URL</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </section>
+        </div>
+        <script>
+            document.getElementById('download-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                const formData = new FormData(this);
+                fetch('/download', { method: 'POST', body: formData })
+                    .then(response => response.json())
+                    .then(data => alert(data.message))
+                    .catch(error => alert('Error: ' + error));
+            });
 
-def get_setting(key):
-    setting = Setting.query.filter_by(key=key).first()
-    return setting.value if setting else defaults.get(key)
+            document.getElementById('clear-queue').addEventListener('click', function() {
+                fetch('/clear', { method: 'POST' })
+                    .then(response => response.json())
+                    .then(data => alert(data.message))
+                    .catch(error => alert('Error: ' + error));
+            });
 
-def set_setting(key, value):
-    setting = Setting.query.filter_by(key=key).first()
-    if setting:
-        setting.value = value
-    else:
-        db.session.add(Setting(key=key, value=value))
-    db.session.commit()
-
-# Celery Task
-@celery.task(bind=True)
-def download_video(self, url, ydl_opts):
-    def progress_hook(d):
-        if d['status'] == 'downloading':
-            self.update_state(state='PROGRESS', meta={
-                'percentage': d.get('_percent_str', '0%'),
-                'speed': d.get('_speed_str', 'N/A'),
-                'url': url
-            })
-        elif d['status'] == 'finished':
-            with app.app_context():
-                db.session.add(History(url=url, timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-                db.session.commit()
-
-    ydl_opts['progress_hooks'] = [progress_hook]
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-# Routes
-@app.route('/', methods=['GET', 'POST'])
-def download():
-    if request.method == 'POST':
-        if 'fetch' in request.form:
-            url = request.form['url'].strip()
-            ydl_opts = {'quiet': True, 'simulate': True}
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    formats = ['Video+Audio (MP4)', 'Audio only (MP3)']
-                    qualities = sorted(set(f.get('height') for f in info['formats'] if f.get('vcodec') != 'none' and f.get('height')))
-                    thumbnail = info.get('thumbnail', '')
-                    return jsonify({
-                        'formats': formats,
-                        'qualities': [f'{q}p' for q in qualities],
-                        'thumbnail': thumbnail
-                    })
-            except Exception as e:
-                return jsonify({'error': str(e)}), 400
-        elif 'download' in request.form:
-            urls = request.form['url'].strip().splitlines()
-            format_type = request.form['format']
-            quality = request.form['quality'].replace('p', '')
-            download_dir = get_setting('download_dir')
-            proxy = get_setting('proxy') or None
-            speed_limit = int(get_setting('speed_limit')) * 1024
-            ydl_opts = {
-                'format': f'bestvideo[height<={quality}]+bestaudio' if format_type == 'Video+Audio (MP4)' else 'bestaudio',
-                'outtmpl': os.path.join(download_dir, '%(title)s.%(ext)s'),
-                'merge_output_format': 'mp4' if format_type == 'Video+Audio (MP4)' else None,
-                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}] if format_type == "Audio only (MP3)" else [],
-                'writesubtitles': True,
-                'ratelimit': speed_limit,
-                'proxy': proxy,
-                'quiet': True
+            function updateStatus() {
+                fetch('/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        const queueBody = document.querySelector('#queue-table tbody');
+                        queueBody.innerHTML = '';
+                        for (let id in data.downloads) {
+                            const task = data.downloads[id];
+                            queueBody.innerHTML += `<tr><td>${task.url}</td><td>${task.status}</td><td>${task.progress}</td></tr>`;
+                        }
+                        const historyBody = document.querySelector('#history-table tbody');
+                        historyBody.innerHTML = '';
+                        data.history.forEach(entry => {
+                            historyBody.innerHTML += `<tr><td>${entry.time}</td><td>${entry.url}</td></tr>`;
+                        });
+                    });
             }
-            tasks = [download_video.delay(url.strip(), ydl_opts).id for url in urls if url.strip()]
-            return jsonify({'task_ids': tasks})
-    return render_template('download.html', theme=get_setting('theme'))
+            setInterval(updateStatus, 1000);
+            updateStatus();
+        </script>
+    </body>
+    </html>
+    """
+    return html
 
-@app.route('/queue')
-def queue():
-    return render_template('queue.html', theme=get_setting('theme'))
+@app.route('/download', methods=['POST'])
+def download():
+    urls = request.form.get('urls', '').strip().splitlines()
+    format_type = request.form.get('format', 'Video+Audio (MP4)')
+    quality = request.form.get('quality', '720p')
 
-@app.route('/history')
-def history():
-    search = request.args.get('search', '')
-    entries = History.query.filter(History.url.contains(search) | History.timestamp.contains(search)).all()
-    return render_template('history.html', history=entries, theme=get_setting('theme'))
+    with queue_lock:
+        for url in urls:
+            if url.strip():
+                task_id = len(active_downloads) + 1
+                active_downloads[task_id] = {
+                    'url': url,
+                    'status': 'Queued',
+                    'progress': '0%',
+                    'format': format_type,
+                    'quality': quality
+                }
+                threading.Thread(target=downloader.download_video, args=(url, format_type, quality, task_id), daemon=True).start()
+                download_history.append({'time': downloader.get_timestamp(), 'url': url})
+    return jsonify({'message': f'Added {len(urls)} URLs to queue'})
 
-@app.route('/settings', methods=['GET', 'POST'])
-def settings():
-    if request.method == 'POST':
-        set_setting('download_dir', request.form['download_dir'])
-        set_setting('proxy', request.form['proxy'])
-        set_setting('speed_limit', request.form['speed_limit'])
-        set_setting('auto_download', request.form.get('auto_download', 'False'))
-        set_setting('notify_sound', request.form.get('notify_sound', 'False'))
-        return jsonify({'success': True})
-    return render_template('settings.html', 
-                          download_dir=get_setting('download_dir'),
-                          proxy=get_setting('proxy'),
-                          speed_limit=get_setting('speed_limit'),
-                          auto_download=get_setting('auto_download') == 'True',
-                          notify_sound=get_setting('notify_sound') == 'True',
-                          theme=get_setting('theme'))
+@app.route('/status', methods=['GET'])
+def status():
+    with queue_lock:
+        return jsonify({'downloads': active_downloads, 'history': download_history})
 
-@app.route('/task_status/<task_id>')
-def task_status(task_id):
-    task = download_video.AsyncResult(task_id)
-    if task.state == 'PENDING':
-        response = {'state': 'Pending', 'percentage': '0%', 'speed': 'N/A', 'url': 'Unknown'}
-    elif task.state == 'PROGRESS':
-        response = {'state': 'Downloading', **task.info}
-    elif task.state == 'SUCCESS':
-        response = {'state': 'Completed', 'percentage': '100%', 'speed': 'N/A', 'url': task.info.get('url', 'Unknown')}
-    else:
-        response = {'state': 'Error', 'percentage': '0%', 'speed': 'N/A', 'url': 'Unknown'}
-    return jsonify(response)
-
-@app.route('/cancel_task/<task_id>')
-def cancel_task(task_id):
-    task = download_video.AsyncResult(task_id)
-    task.revoke(terminate=True)
-    return jsonify({'success': True})
-
-@app.route('/toggle_theme', methods=['POST'])
-def toggle_theme():
-    current = get_setting('theme')
-    new_theme = 'light' if current == 'dark' else 'dark'
-    set_setting('theme', new_theme)
-    return jsonify({'theme': new_theme})
+@app.route('/clear', methods=['POST'])
+def clear():
+    with queue_lock:
+        active_downloads.clear()
+    return jsonify({'message': 'Queue cleared'})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
