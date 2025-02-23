@@ -1,109 +1,119 @@
 from flask import Flask, request, jsonify
 import threading
 import os
-from downloader import Downloader
+import yt_dlp
 
 app = Flask(__name__)
 
 # Global variables
-download_dir = os.getenv('DOWNLOAD_DIR', os.getcwd())  # Allow Render to override download directory if needed
-downloader = Downloader(download_dir)
+download_dir = os.getenv('DOWNLOAD_DIR', os.getcwd())
 queue_lock = threading.Lock()
 active_downloads = {}
 download_history = []
 
+def download_video(url, format_type, quality, task_id):
+    global active_downloads
+    ydl_opts = {
+        'format': f'bestvideo[height<={quality[:-1]}]+bestaudio' if format_type == 'Video+Audio (MP4)' else 'bestaudio',
+        'outtmpl': os.path.join(download_dir, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'merge_output_format': 'mp4' if format_type == 'Video+Audio (MP4)' else None,
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}] if format_type == 'Audio only (MP3)' else [],
+        'progress_hooks': [lambda d: progress_hook(d, task_id)],
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        with queue_lock:
+            active_downloads[task_id]['status'] = 'Completed'
+            active_downloads[task_id]['progress'] = '100%'
+    except Exception as e:
+        with queue_lock:
+            active_downloads[task_id]['status'] = 'Error'
+            active_downloads[task_id]['progress'] = str(e)
+
+def progress_hook(d, task_id):
+    with queue_lock:
+        if d['status'] == 'downloading':
+            active_downloads[task_id]['status'] = 'Downloading'
+            active_downloads[task_id]['progress'] = d.get('_percent_str', '0%')
+
 @app.route('/')
 def index():
-    html = """
+    return """
     <!DOCTYPE html>
-    <html lang="en">
+    <html>
     <head>
-        <meta charset="UTF-8">
         <title>Social Media Downloader</title>
         <style>
-            body { font-family: Arial, sans-serif; background-color: #1E272C; color: #ECEFF1; margin: 0; padding: 0; }
-            header { background-color: #0288D1; padding: 10px; text-align: center; }
-            .container { display: flex; justify-content: space-around; padding: 20px; }
-            section { background-color: #2E3B41; padding: 20px; border-radius: 5px; width: 30%; }
-            h2 { color: #81D4FA; }
-            form label { margin-top: 10px; display: block; }
-            textarea, select, button { width: 100%; margin-top: 5px; padding: 5px; }
-            button { background-color: #0288D1; color: white; border: none; padding: 10px; cursor: pointer; }
-            button:hover { background-color: #4FC3F7; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            th, td { border: 1px solid #ECEFF1; padding: 8px; text-align: left; }
-            th { background-color: #0288D1; }
+            body { font-family: Arial, sans-serif; background: #f0f0f0; margin: 20px; }
+            h1 { color: #333; }
+            form, .section { margin: 20px 0; padding: 10px; background: white; border-radius: 5px; }
+            textarea, select, button { width: 100%; margin: 5px 0; padding: 5px; }
+            button { background: #007bff; color: white; border: none; cursor: pointer; }
+            button:hover { background: #0056b3; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background: #007bff; color: white; }
         </style>
     </head>
     <body>
-        <header><h1>Social Media Downloader</h1></header>
-        <div class="container">
-            <section id="download-section">
-                <h2>Download</h2>
-                <form id="download-form">
-                    <label for="urls">URLs (one per line):</label><br>
-                    <textarea id="urls" name="urls" rows="5" cols="50"></textarea><br>
-                    <label for="format">Format:</label>
-                    <select id="format" name="format">
-                        <option value="Video+Audio (MP4)">Video+Audio (MP4)</option>
-                        <option value="Audio only (MP3)">Audio only (MP3)</option>
-                    </select><br>
-                    <label for="quality">Quality:</label>
-                    <select id="quality" name="quality">
-                        <option value="720p">720p</option>
-                        <option value="480p">480p</option>
-                        <option value="1080p">1080p</option>
-                    </select><br>
-                    <button type="submit">Download</button>
-                </form>
-            </section>
-            <section id="queue-section">
-                <h2>Queue</h2>
-                <button id="clear-queue">Clear Queue</button>
-                <table id="queue-table">
-                    <thead><tr><th>URL</th><th>Status</th><th>Progress</th></tr></thead>
-                    <tbody></tbody>
-                </table>
-            </section>
-            <section id="history-section">
-                <h2>History</h2>
-                <table id="history-table">
-                    <thead><tr><th>Time</th><th>URL</th></tr></thead>
-                    <tbody></tbody>
-                </table>
-            </section>
+        <h1>Social Media Downloader</h1>
+        <form id="download-form">
+            <label>URLs (one per line):</label><br>
+            <textarea name="urls" rows="5"></textarea><br>
+            <label>Format:</label>
+            <select name="format">
+                <option value="Video+Audio (MP4)">Video+Audio (MP4)</option>
+                <option value="Audio only (MP3)">Audio only (MP3)</option>
+            </select><br>
+            <label>Quality:</label>
+            <select name="quality">
+                <option value="720p">720p</option>
+                <option value="480p">480p</option>
+                <option value="1080p">1080p</option>
+            </select><br>
+            <button type="submit">Download</button>
+        </form>
+        <div class="section">
+            <h2>Queue</h2>
+            <button id="clear-queue">Clear Queue</button>
+            <table id="queue-table">
+                <tr><th>URL</th><th>Status</th><th>Progress</th></tr>
+            </table>
+        </div>
+        <div class="section">
+            <h2>History</h2>
+            <table id="history-table">
+                <tr><th>Time</th><th>URL</th></tr>
+            </table>
         </div>
         <script>
             document.getElementById('download-form').addEventListener('submit', function(e) {
                 e.preventDefault();
-                const formData = new FormData(this);
-                fetch('/download', { method: 'POST', body: formData })
-                    .then(response => response.json())
-                    .then(data => alert(data.message))
-                    .catch(error => alert('Error: ' + error));
+                fetch('/download', { method: 'POST', body: new FormData(this) })
+                    .then(res => res.json())
+                    .then(data => alert(data.message));
             });
-
             document.getElementById('clear-queue').addEventListener('click', function() {
                 fetch('/clear', { method: 'POST' })
-                    .then(response => response.json())
-                    .then(data => alert(data.message))
-                    .catch(error => alert('Error: ' + error));
+                    .then(res => res.json())
+                    .then(data => alert(data.message));
             });
-
             function updateStatus() {
                 fetch('/status')
-                    .then(response => response.json())
+                    .then(res => res.json())
                     .then(data => {
-                        const queueBody = document.querySelector('#queue-table tbody');
-                        queueBody.innerHTML = '';
+                        const queueTable = document.getElementById('queue-table');
+                        queueTable.innerHTML = '<tr><th>URL</th><th>Status</th><th>Progress</th></tr>';
                         for (let id in data.downloads) {
                             const task = data.downloads[id];
-                            queueBody.innerHTML += `<tr><td>${task.url}</td><td>${task.status}</td><td>${task.progress}</td></tr>`;
+                            queueTable.innerHTML += `<tr><td>${task.url}</td><td>${task.status}</td><td>${task.progress}</td></tr>`;
                         }
-                        const historyBody = document.querySelector('#history-table tbody');
-                        historyBody.innerHTML = '';
+                        const historyTable = document.getElementById('history-table');
+                        historyTable.innerHTML = '<tr><th>Time</th><th>URL</th></tr>';
                         data.history.forEach(entry => {
-                            historyBody.innerHTML += `<tr><td>${entry.time}</td><td>${entry.url}</td></tr>`;
+                            historyTable.innerHTML += `<tr><td>${entry.time}</td><td>${entry.url}</td></tr>`;
                         });
                     });
             }
@@ -113,7 +123,6 @@ def index():
     </body>
     </html>
     """
-    return html
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -125,15 +134,9 @@ def download():
         for url in urls:
             if url.strip():
                 task_id = len(active_downloads) + 1
-                active_downloads[task_id] = {
-                    'url': url,
-                    'status': 'Queued',
-                    'progress': '0%',
-                    'format': format_type,
-                    'quality': quality
-                }
-                threading.Thread(target=downloader.download_video, args=(url, format_type, quality, task_id), daemon=True).start()
-                download_history.append({'time': downloader.get_timestamp(), 'url': url})
+                active_downloads[task_id] = {'url': url, 'status': 'Queued', 'progress': '0%'}
+                download_history.append({'time': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'url': url})
+                threading.Thread(target=download_video, args=(url, format_type, quality, task_id), daemon=True).start()
     return jsonify({'message': f'Added {len(urls)} URLs to queue'})
 
 @app.route('/status', methods=['GET'])
@@ -148,5 +151,5 @@ def clear():
     return jsonify({'message': 'Queue cleared'})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))  # Use Render's PORT or default to 5000
-    app.run(host='0.0.0.0', port=port, debug=False)  # Bind to 0.0.0.0 for Render, disable debug in production
+    port = int(os.environ.get('PORT', 5000))  # Heroku assigns PORT
+    app.run(host='0.0.0.0', port=port, debug=False)
