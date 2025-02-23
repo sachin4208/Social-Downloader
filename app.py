@@ -6,7 +6,7 @@ from downloader import Downloader
 app = Flask(__name__)
 
 # Global variables
-download_dir = os.getcwd()
+download_dir = os.getenv('DOWNLOAD_DIR', os.getcwd())  # Allow Render to override download directory if needed
 downloader = Downloader(download_dir)
 queue_lock = threading.Lock()
 active_downloads = {}
@@ -148,5 +148,5 @@ def clear():
     return jsonify({'message': 'Queue cleared'})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))  # Render assigns PORT
-    app.run(debug=False, host='0.0.0.0', port=port)  # Bind to 0.0.0.0 for Render
+    port = int(os.environ.get('PORT', 5000))  # Use Render's PORT or default to 5000
+    app.run(host='0.0.0.0', port=port, debug=False)  # Bind to 0.0.0.0 for Render, disable debug in production
