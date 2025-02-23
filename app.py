@@ -151,5 +151,5 @@ def clear():
     return jsonify({'message': 'Queue cleared'})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))  # Heroku assigns PORT
+    port = int(os.environ.get('PORT', 5000))  # Render assigns PORT
     app.run(host='0.0.0.0', port=port, debug=False)
