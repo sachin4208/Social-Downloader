@@ -1,0 +1,7 @@
+Flask
+Flask-SQLAlchemy
+celery[redis]
+yt_dlp
+redis
+requests
+Flask-Bootstrap
