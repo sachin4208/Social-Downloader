@@ -1,163 +1,124 @@
-from flask import Flask, request, jsonify
-import threading
-import os
+from flask import Flask, request, render_template_string, send_file
 import yt_dlp
+import os
+import requests
+from io import BytesIO
 
 app = Flask(__name__)
 
-# Global variables
+# Directory for temporary downloads
 download_dir = os.getenv('DOWNLOAD_DIR', os.getcwd())
-queue_lock = threading.Lock()
-active_downloads = {}
-download_history = []
 
-def download_video(url, format_type, quality, task_id):
-    global active_downloads
-    ydl_opts = {
-        'format': f'bestvideo[height<={quality[:-1]}]+bestaudio' if format_type == 'Video+Audio (MP4)' else 'bestaudio',
-        'outtmpl': os.path.join(download_dir, '%(title)s.%(ext)s'),
-        'quiet': True,
-        'merge_output_format': 'mp4' if format_type == 'Video+Audio (MP4)' else None,
-        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}] if format_type == 'Audio only (MP3)' else [],
-        'progress_hooks': [lambda d: progress_hook(d, task_id)],
-        'nocheckcertificate': True,  # Avoid SSL issues
-        'ignoreerrors': False,       # Report errors instead of skipping
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        with queue_lock:
-            active_downloads[task_id]['status'] = 'Completed'
-            active_downloads[task_id]['progress'] = '100%'
-    except Exception as e:
-        with queue_lock:
-            error_msg = str(e)
-            if "Sign in to confirm" in error_msg:
-                active_downloads[task_id]['status'] = 'Error'
-                active_downloads[task_id]['progress'] = 'Requires login (cookies needed)'
-            else:
-                active_downloads[task_id]['status'] = 'Error'
-                active_downloads[task_id]['progress'] = error_msg
-
-def progress_hook(d, task_id):
-    with queue_lock:
-        if d['status'] == 'downloading':
-            active_downloads[task_id]['status'] = 'Downloading'
-            active_downloads[task_id]['progress'] = d.get('_percent_str', '0%')
-
-@app.route('/')
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    return """
+    video_info = None
+    thumbnail_url = None
+    qualities = []
+    error = None
+
+    if request.method == 'POST' and 'url' in request.form:
+        url = request.form['url']
+        try:
+            # Fetch video info without downloading
+            ydl_opts = {'quiet': True, 'simulate': True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            
+            # Extract details
+            video_info = {
+                'title': info.get('title', 'Unknown Title'),
+                'url': url
+            }
+            thumbnail_url = info.get('thumbnail')
+            # Get available video qualities (heights)
+            qualities = sorted(set(fmt['height'] for fmt in info['formats'] 
+                                 if fmt.get('vcodec') != 'none' and fmt.get('height')), 
+                             reverse=True)
+        except Exception as e:
+            error = f"Error fetching details: {str(e)}"
+
+    # HTML template with form, preview, and download options
+    html = """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Social Media Downloader</title>
+        <title>Simple Video Downloader</title>
         <style>
             body { font-family: Arial, sans-serif; background: #f0f0f0; margin: 20px; }
             h1 { color: #333; }
             form, .section { margin: 20px 0; padding: 10px; background: white; border-radius: 5px; }
-            textarea, select, button { width: 100%; margin: 5px 0; padding: 5px; }
+            input[type="text"], select, button { width: 100%; margin: 5px 0; padding: 5px; }
             button { background: #007bff; color: white; border: none; cursor: pointer; }
             button:hover { background: #0056b3; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background: #007bff; color: white; }
-            .note { font-size: 0.9em; color: #555; }
+            img { max-width: 300px; margin: 10px 0; }
+            .error { color: red; }
         </style>
     </head>
     <body>
-        <h1>Social Media Downloader</h1>
-        <form id="download-form">
-            <label>URLs (one per line):</label><br>
-            <textarea name="urls" rows="5"></textarea><br>
-            <label>Format:</label>
-            <select name="format">
-                <option value="Video+Audio (MP4)">Video+Audio (MP4)</option>
-                <option value="Audio only (MP3)">Audio only (MP3)</option>
-            </select><br>
-            <label>Quality:</label>
-            <select name="quality">
-                <option value="720p">720p</option>
-                <option value="480p">480p</option>
-                <option value="1080p">1080p</option>
-            </select><br>
-            <button type="submit">Download</button>
-            <p class="note">Note: Some videos (e.g., Shorts or restricted content) require login and won’t work without cookies.</p>
+        <h1>Simple Video Downloader</h1>
+        <form method="POST">
+            <label>Paste Video URL:</label><br>
+            <input type="text" name="url" placeholder="e.g., https://www.youtube.com/watch?v=..." required><br>
+            <button type="submit">Get Details</button>
         </form>
-        <div class="section">
-            <h2>Queue</h2>
-            <button id="clear-queue">Clear Queue</button>
-            <table id="queue-table">
-                <tr><th>URL</th><th>Status</th><th>Progress</th></tr>
-            </table>
-        </div>
-        <div class="section">
-            <h2>History</h2>
-            <table id="history-table">
-                <tr><th>Time</th><th>URL</th></tr>
-            </table>
-        </div>
-        <script>
-            document.getElementById('download-form').addEventListener('submit', function(e) {
-                e.preventDefault();
-                fetch('/download', { method: 'POST', body: new FormData(this) })
-                    .then(res => res.json())
-                    .then(data => alert(data.message));
-            });
-            document.getElementById('clear-queue').addEventListener('click', function() {
-                fetch('/clear', { method: 'POST' })
-                    .then(res => res.json())
-                    .then(data => alert(data.message));
-            });
-            function updateStatus() {
-                fetch('/status')
-                    .then(res => res.json())
-                    .then(data => {
-                        const queueTable = document.getElementById('queue-table');
-                        queueTable.innerHTML = '<tr><th>URL</th><th>Status</th><th>Progress</th></tr>';
-                        for (let id in data.downloads) {
-                            const task = data.downloads[id];
-                            queueTable.innerHTML += `<tr><td>${task.url}</td><td>${task.status}</td><td>${task.progress}</td></tr>`;
-                        }
-                        const historyTable = document.getElementById('history-table');
-                        historyTable.innerHTML = '<tr><th>Time</th><th>URL</th></tr>';
-                        data.history.forEach(entry => {
-                            historyTable.innerHTML += `<tr><td>${entry.time}</td><td>${entry.url}</td></tr>`;
-                        });
-                    });
-            }
-            setInterval(updateStatus, 1000);
-            updateStatus();
-        </script>
+        {% if error %}
+            <p class="error">{{ error }}</p>
+        {% endif %}
+        {% if video_info %}
+            <div class="section">
+                <h2>{{ video_info.title }}</h2>
+                {% if thumbnail_url %}
+                    <img src="{{ thumbnail_url }}" alt="Thumbnail">
+                {% endif %}
+                <form method="POST" action="/download">
+                    <input type="hidden" name="url" value="{{ video_info.url }}">
+                    <label>Download Options:</label><br>
+                    <select name="quality">
+                        {% for q in qualities %}
+                            <option value="{{ q }}">{{ q }}p</option>
+                        {% endfor %}
+                    </select><br>
+                    <button type="submit" name="format" value="mp4">Download MP4</button>
+                    <button type="submit" name="format" value="mp3">Download MP3</button>
+                </form>
+            </div>
+        {% endif %}
     </body>
     </html>
     """
+    return render_template_string(html, video_info=video_info, thumbnail_url=thumbnail_url, qualities=qualities, error=error)
 
 @app.route('/download', methods=['POST'])
 def download():
-    urls = request.form.get('urls', '').strip().splitlines()
-    format_type = request.form.get('format', 'Video+Audio (MP4)')
-    quality = request.form.get('quality', '720p')
+    url = request.form['url']
+    format_type = request.form['format']
+    quality = request.form['quality']
 
-    with queue_lock:
-        for url in urls:
-            if url.strip():
-                task_id = len(active_downloads) + 1
-                active_downloads[task_id] = {'url': url, 'status': 'Queued', 'progress': '0%'}
-                download_history.append({'time': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'url': url})
-                threading.Thread(target=download_video, args=(url, format_type, quality, task_id), daemon=True).start()
-    return jsonify({'message': f'Added {len(urls)} URLs to queue'})
+    ydl_opts = {
+        'format': f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]' if format_type == 'mp4' else 'bestaudio',
+        'outtmpl': os.path.join(download_dir, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'merge_output_format': 'mp4' if format_type == 'mp4' else None,
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}] if format_type == 'mp3' else [],
+        'nocheckcertificate': True,
+    }
 
-@app.route('/status', methods=['GET'])
-def status():
-    with queue_lock:
-        return jsonify({'downloads': active_downloads, 'history': download_history})
-
-@app.route('/clear', methods=['POST'])
-def clear():
-    with queue_lock:
-        active_downloads.clear()
-    return jsonify({'message': 'Queue cleared'})
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            if format_type == 'mp3':
+                # Adjust filename for MP3 extension after postprocessing
+                base, _ = os.path.splitext(filename)
+                filename = base + '.mp3'
+        
+        # Send file as attachment and remove it afterward
+        with open(filename, 'rb') as f:
+            file_data = BytesIO(f.read())
+        os.remove(filename)
+        return send_file(file_data, as_attachment=True, download_name=os.path.basename(filename))
+    except Exception as e:
+        return f"Error downloading: {str(e)}", 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))  # Render assigns PORT
