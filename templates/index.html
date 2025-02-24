@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="keywords" content="YouTube Downloader, Video Download, MP4, MP3">
+    <meta name="description" content="Download YouTube videos in various formats and qualities easily.">
+
+    <title>YouTube Video Downloader</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://kit.fontawesome.com/938d7bb336.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div class="wrapper">
+        <div class="container">
+            <div class="card-header header112 text-center">
+                <h4 class="text-gradient"><u>YouTube Video Downloader</u></h4>
+                <h6 class="scroll-container">
+                    <marquee class="scroll-text">Created by: Sachin || All Rights Reserved!</marquee>
+                </h6>
+            </div>
+            <br>
+            <div class="card-body p-4">
+                <form method="POST" enctype="multipart/form-data" id="fetch-form">
+                    <input type="hidden" name="action" value="fetch">
+                    <div class="row mb-3">
+                        <div class="col-md-12">
+                            <div class="form-group">
+                                <label class="fw-bold"><i class="fas fa-link"></i> YouTube Video Link</label>
+                                <input type="text" name="link" class="form-control link" placeholder="Paste the video link" required>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-md-12">
+                            <div class="form-group">
+                                <label class="fw-bold"><i class="fas fa-key"></i> Cookies (optional, .txt)</label>
+                                <input type="file" name="cookies" class="form-control" accept=".txt">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-12 text-center">
+                            <button type="submit" class="btn btn-primary fetch-btn tm-view-more-btn"><i class="fas fa-info-circle"></i> Get Details</button>
+                        </div>
+                    </div>
+                </form>
+                {% if error %}
+                    <div class="alert alert-danger mt-3">{{ error }}</div>
+                {% endif %}
+                {% if title %}
+                    <div class="video-info section mt-4 fade-in">
+                        <h5>{{ title }}</h5>
+                        {% if thumbnail %}
+                            <img src="{{ thumbnail }}" class="img-fluid rounded mb-3" alt="Video Thumbnail">
+                        {% endif %}
+                        <form method="POST" enctype="multipart/form-data" id="download-form">
+                            <input type="hidden" name="action" value="download">
+                            <input type="hidden" name="link" value="{{ request.form['link'] }}">
+                            <input type="hidden" name="cookies" id="cookies-hidden">
+                            <div class="form-group">
+                                <label class="fw-bold"><i class="fas fa-sort-down"></i> Select Format</label>
+                                <select name="quality" class="form-control formte">
+                                    {% for q in qualities %}
+                                        <option value="{{ q }}">{{ q }}p</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="mt-3 text-center">
+                                <button type="submit" name="format" value="mp4" class="btn btn-success download-btn tm-view-more-btn"><i class="fas fa-download"></i> MP4</button>
+                                <button type="submit" name="format" value="mp3" class="btn btn-success download-btn tm-view-more-btn"><i class="fas fa-download"></i> MP3</button>
+                            </div>
+                        </form>
+                    </div>
+                {% endif %}
+                <hr class="my-4">
+                <div class="dual-btn-container text-center">
+                    <a class="dual-color-btn shine-hope-anim" href="#">See My Other Works</a>
+                </div>
+                <div class="text-center mt-4">
+                    <h3>How To Use <i class="fas fa-arrow-down"></i></h3>
+                    <video width="300" controls class="rounded">
+                        <source src="{{ url_for('static', filename='video/guide.mp4') }}" type="video/mp4">
+                        Your browser does not support HTML video.
+                    </video>
+                </div>
+                <div class="blink blink-two text-center mt-3">
+                    <h6><b>Stay on this page after clicking download!</b></h6>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
