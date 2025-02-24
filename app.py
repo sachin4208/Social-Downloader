@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import threading
 import os
 import yt_dlp
-import tempfile
 
 app = Flask(__name__)
 
@@ -12,7 +11,7 @@ queue_lock = threading.Lock()
 active_downloads = {}
 download_history = []
 
-def download_video(url, format_type, quality, task_id, cookies=None):
+def download_video(url, format_type, quality, task_id):
     global active_downloads
     ydl_opts = {
         'format': f'bestvideo[height<={quality[:-1]}]+bestaudio' if format_type == 'Video+Audio (MP4)' else 'bestaudio',
@@ -21,11 +20,9 @@ def download_video(url, format_type, quality, task_id, cookies=None):
         'merge_output_format': 'mp4' if format_type == 'Video+Audio (MP4)' else None,
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}] if format_type == 'Audio only (MP3)' else [],
         'progress_hooks': [lambda d: progress_hook(d, task_id)],
+        'nocheckcertificate': True,  # Avoid SSL issues
+        'ignoreerrors': False,       # Report errors instead of skipping
     }
-    # Add cookies if provided
-    if cookies:
-        ydl_opts['cookiefile'] = cookies
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -34,12 +31,13 @@ def download_video(url, format_type, quality, task_id, cookies=None):
             active_downloads[task_id]['progress'] = '100%'
     except Exception as e:
         with queue_lock:
-            active_downloads[task_id]['status'] = 'Error'
-            active_downloads[task_id]['progress'] = str(e)
-    finally:
-        # Clean up temporary cookie file if it exists
-        if cookies and os.path.exists(cookies):
-            os.remove(cookies)
+            error_msg = str(e)
+            if "Sign in to confirm" in error_msg:
+                active_downloads[task_id]['status'] = 'Error'
+                active_downloads[task_id]['progress'] = 'Requires login (cookies needed)'
+            else:
+                active_downloads[task_id]['status'] = 'Error'
+                active_downloads[task_id]['progress'] = error_msg
 
 def progress_hook(d, task_id):
     with queue_lock:
@@ -58,17 +56,18 @@ def index():
             body { font-family: Arial, sans-serif; background: #f0f0f0; margin: 20px; }
             h1 { color: #333; }
             form, .section { margin: 20px 0; padding: 10px; background: white; border-radius: 5px; }
-            textarea, select, button, input[type="file"] { width: 100%; margin: 5px 0; padding: 5px; }
+            textarea, select, button { width: 100%; margin: 5px 0; padding: 5px; }
             button { background: #007bff; color: white; border: none; cursor: pointer; }
             button:hover { background: #0056b3; }
             table { width: 100%; border-collapse: collapse; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
             th { background: #007bff; color: white; }
+            .note { font-size: 0.9em; color: #555; }
         </style>
     </head>
     <body>
         <h1>Social Media Downloader</h1>
-        <form id="download-form" enctype="multipart/form-data">
+        <form id="download-form">
             <label>URLs (one per line):</label><br>
             <textarea name="urls" rows="5"></textarea><br>
             <label>Format:</label>
@@ -82,9 +81,8 @@ def index():
                 <option value="480p">480p</option>
                 <option value="1080p">1080p</option>
             </select><br>
-            <label>Cookies (optional, .txt file):</label>
-            <input type="file" name="cookies" accept=".txt"><br>
             <button type="submit">Download</button>
+            <p class="note">Note: Some videos (e.g., Shorts or restricted content) require login and won’t work without cookies.</p>
         </form>
         <div class="section">
             <h2>Queue</h2>
@@ -140,13 +138,6 @@ def download():
     urls = request.form.get('urls', '').strip().splitlines()
     format_type = request.form.get('format', 'Video+Audio (MP4)')
     quality = request.form.get('quality', '720p')
-    cookies_file = request.files.get('cookies')
-
-    cookies_path = None
-    if cookies_file and cookies_file.filename.endswith('.txt'):
-        # Save cookies to a temporary file
-        cookies_path = os.path.join(tempfile.gettempdir(), f'cookies_{os.urandom(8).hex()}.txt')
-        cookies_file.save(cookies_path)
 
     with queue_lock:
         for url in urls:
@@ -154,7 +145,7 @@ def download():
                 task_id = len(active_downloads) + 1
                 active_downloads[task_id] = {'url': url, 'status': 'Queued', 'progress': '0%'}
                 download_history.append({'time': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'url': url})
-                threading.Thread(target=download_video, args=(url, format_type, quality, task_id, cookies_path), daemon=True).start()
+                threading.Thread(target=download_video, args=(url, format_type, quality, task_id), daemon=True).start()
     return jsonify({'message': f'Added {len(urls)} URLs to queue'})
 
 @app.route('/status', methods=['GET'])
